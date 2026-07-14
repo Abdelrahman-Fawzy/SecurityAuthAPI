@@ -16,12 +16,19 @@ namespace SecureAuthAPI.Controllers
     public class AuthController : ControllerBase
     {
         private readonly UserManager<ApplicationUser> _userManager;
+        private readonly RoleManager<IdentityRole> _roleManager;
         private readonly IConfiguration _config;
         private readonly ISendEmail _emailMessage;
 
-        public AuthController(UserManager<ApplicationUser> userManager, IConfiguration config, ISendEmail emailMessage)
+        public AuthController(
+            UserManager<ApplicationUser> userManager,
+            RoleManager<IdentityRole> roleManager,
+            IConfiguration config, 
+            ISendEmail emailMessage
+           )
         {
             _userManager = userManager;
+            _roleManager = roleManager;
             _config = config;
             _emailMessage = emailMessage;
         }
@@ -42,6 +49,15 @@ namespace SecureAuthAPI.Controllers
             var result = await _userManager.CreateAsync(user, model.Password);
 
             if (result.Succeeded) {
+
+                foreach(var role in model.Roles)
+                {
+                    if (!await _roleManager.RoleExistsAsync(role))
+                        await _roleManager.CreateAsync(new IdentityRole(role));
+
+                    await _userManager.AddToRoleAsync(user, role);
+                }
+
                 var token = await _userManager.GenerateEmailConfirmationTokenAsync(user);
 
                 var encodedToken = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(token));
@@ -151,7 +167,7 @@ namespace SecureAuthAPI.Controllers
             return BadRequest(result.Errors);
         }
 
-        private string GenerateToken(ApplicationUser user)
+        private async Task<string> GenerateToken(ApplicationUser user)
         {
             var userClaims = new List<Claim>
             {
@@ -159,6 +175,12 @@ namespace SecureAuthAPI.Controllers
                 new Claim(ClaimTypes.Name, user.FullName),
                 new Claim(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };
+
+            var userRoles = await _userManager.GetRolesAsync(user);
+            foreach (var role in userRoles)
+            {
+                userClaims.Add(new Claim(ClaimTypes.Role, role));
+            }
 
             var authSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]));
 
