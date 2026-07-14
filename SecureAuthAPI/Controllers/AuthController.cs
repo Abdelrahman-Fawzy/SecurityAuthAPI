@@ -7,6 +7,7 @@ using SecureAuthAPI.Models;
 using SecureAuthAPI.Services;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace SecureAuthAPI.Controllers
@@ -117,11 +118,62 @@ namespace SecureAuthAPI.Controllers
                 {
                     return BadRequest(new { Message = "حسابك لم يتم تفعيله بعد! يرجى مراجعة إيميلك وتفعيل الحساب أولاً." });
                 }
-                var token = GenerateToken(user);
-                return Ok(new { Token = token, Message = "لقد تم تسجيل دخولك بنجاح" });
+
+                var token = await GenerateToken(user);
+                var refreshToken = GenerateRefreshToken();
+
+                user.RefreshToken = refreshToken;
+                user.DateTimeExpiryTime = DateTime.UtcNow.AddMinutes(2);
+
+                await _userManager.UpdateAsync(user);
+
+                return Ok(new { 
+                    Token = token,
+                    RefreshToken = refreshToken,
+                    Message = "لقد تم تسجيل دخولك بنجاح" });
             }
 
             return Unauthorized(new { Message = "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
+        }
+
+        [HttpPost("refresh-token")]
+        public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenModel model)
+        {
+            if (model == null) return BadRequest(new { Message = "طلب غير صالح" });
+
+            ClaimsPrincipal? principal;
+
+            try
+            {
+                principal = GetClaimsFromExpiryToken(model.AccessToken);
+            }
+            catch
+            {
+                return BadRequest(new { Message = "الـ Access Token المرسل غير صالح بالكامل" });
+            }
+
+            if (principal == null) {
+                return BadRequest(new { Message = "توكن غير صالح" });
+            }
+
+            var userId = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var user = await _userManager.FindByIdAsync(userId);
+
+            if(user == null || user.RefreshToken != model.RefreshToken || user.DateTimeExpiryTime <= DateTime.UtcNow)
+                return BadRequest(new { Message = "الـ Refresh Token غير صالح أو انتهت صلاحيته. يجب تسجيل الدخول مجدداً!" });
+
+            var newAccessToken = await GenerateToken(user);
+            var newRefreshToken = GenerateRefreshToken();
+
+            user.RefreshToken = newRefreshToken;
+            await _userManager.UpdateAsync(user);
+
+            return Ok(new
+            {
+                Token = newAccessToken,
+                RefreshToken = newRefreshToken
+            });
+
         }
 
         [HttpPost("ForgetPassword")]
@@ -198,6 +250,38 @@ namespace SecureAuthAPI.Controllers
 
             return tokenHandler.WriteToken(securityToken);
 
+        }
+
+        private string GenerateRefreshToken()
+        {
+            var randomNumbers = new Byte[64];
+            var rng = RandomNumberGenerator.Create();
+            rng.GetBytes(randomNumbers);
+            return Convert.ToBase64String(randomNumbers);
+        }
+
+        private ClaimsPrincipal GetClaimsFromExpiryToken(string token)
+        {
+            var tokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateAudience = false,
+                ValidateIssuer = false,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"])),
+                ValidateLifetime = false,
+            };
+
+            var tokenHandlr = new JwtSecurityTokenHandler();
+            var principle = tokenHandlr.ValidateToken(token, tokenValidationParameters, out SecurityToken validationToken);
+
+            if(validationToken is not JwtSecurityToken validationToken2 || 
+                !validationToken2.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase)
+                )
+            {
+                throw new SecurityTokenException("توكن غير صالح");
+            }
+
+            return principle;
         }
     }
 }
